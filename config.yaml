@@ -1,0 +1,163 @@
+# =============================================================================
+# HLF Dynamic Deployment Configuration
+# =============================================================================
+# Chay:  ./hlf-deploy.sh config.yaml
+#        ./hlf-deploy.sh config.yaml --skip-confirm    (khong hoi confirm)
+#        ./hlf-deploy.sh config.yaml --step=5           (nhay toi step 5)
+# =============================================================================
+
+# =============================================================================
+# GLOBAL: Version cac image va storage
+# =============================================================================
+global:
+  peer_image: hyperledger/fabric-peer
+  peer_version: "3.1.3"
+  orderer_image: hyperledger/fabric-orderer
+  orderer_version: "3.1.3"
+  ca_image: hyperledger/fabric-ca
+  ca_version: "1.5.16"
+  storage_class: default
+  ca_capacity: 1Gi
+  orderer_capacity: 2Gi
+  peer_capacity: 5Gi
+  peer_statedb: couchdb     # couchdb | leveldb
+  enroll_id: enroll
+  enroll_pw: enrollpw
+
+# =============================================================================
+# ORDERER: To chuc quan ly ordering service
+# =============================================================================
+# - Orderer la thanh phan SAP XEP thu tu transaction truoc khi ghi vao block
+# - count: 3 => tao 3 node: orderer0, orderer1, orderer2 (chay consensus Raft)
+# - Ca 3 orderer dung chung 1 CA (orderer-ca) de cap chung chi
+# - 3 node dam bao fault-tolerance: 1 node chet van hoat dong (2/3 consensus)
+# =============================================================================
+orderer:
+  namespace: orderer
+  mspid: ordererMSP
+  ca_name: orderer-ca
+  admin_user: ordadmin
+  admin_pw: ordadminpw
+  count: 3                   # => orderer0, orderer1, orderer2
+
+# =============================================================================
+# ORGS: Cac to chuc (organization) tham gia mang luoi
+# =============================================================================
+# Moi org la 1 don vi doc lap (vd: 1 cong ty, 1 phong ban)
+# - ca_name  : Certificate Authority rieng cho org (cap chung chi)
+# - peer_count: so luong peer node cua org
+#
+# PEER la gi?
+#   - Peer luu tru ban sao ledger (so cai) va chay chaincode (smart contract)
+#   - Nhieu peer = du phong cao hon + xu ly nhieu transaction hon
+#
+# nodea: peer_count = 0
+#   => Chi co CA (chung chi) nhung KHONG co peer
+#   => Khong the join channel, khong the chay chaincode
+#   => Dung khi: org chi quan ly identity, hoac chua can tham gia giao dich
+# =============================================================================
+orgs:
+  - name: nodea
+    namespace: nodea
+    mspid: nodeaMSP
+    ca_name: nodea-ca
+    admin_user: admin
+    admin_pw: adminpw
+    peer_count: 0            # Chi co CA, khong co peer
+
+  - name: nodeb
+    namespace: nodeb
+    mspid: nodebMSP
+    ca_name: nodeb-ca
+    admin_user: admin
+    admin_pw: adminpw
+    peer_count: 2            # peer0, peer1
+
+  - name: nodec
+    namespace: nodec
+    mspid: nodecMSP
+    ca_name: nodec-ca
+    admin_user: admin
+    admin_pw: adminpw
+    peer_count: 2            # peer0, peer1
+
+  - name: noded
+    namespace: noded
+    mspid: nodedMSP
+    ca_name: noded-ca
+    admin_user: admin
+    admin_pw: adminpw
+    peer_count: 2            # peer0, peer1
+
+# =============================================================================
+# CHANNELS: Kenh giao tiep giua cac org
+# =============================================================================
+# batchTimeout: Orderer doi bao lau truoc khi dong 1 block (0.5s = nhanh)
+# maxMessageCount: So transaction toi da trong 1 block (200)
+# =============================================================================
+channel_config:
+  batch_timeout: "0.5s"
+  batch_size:
+    max_message_count: 200
+    absolute_max_bytes: 1048576
+    preferred_max_bytes: 524288
+
+channels:
+  - name: channel-part1
+    orgs: [nodeb, nodec]
+
+  - name: channel-part2
+    orgs: [nodeb, noded]
+
+  - name: channel-asset1
+    orgs: [nodeb, nodec]
+
+  - name: channel-asset2
+    orgs: [nodeb, noded]
+
+# =============================================================================
+# CHAINCODES: Smart contract deploy len cac channel
+# =============================================================================
+# CHAINCODE la gi?
+#   - Code chay tren peer, xu ly business logic (doc/ghi ledger)
+#   - Deploy theo kieu CCAAS (Chaincode-as-a-Service): chay nhu 1 container rieng
+#
+# Quy trinh deploy 1 chaincode:
+#   1. PACKAGE  : dong goi code thanh file .tgz
+#   2. INSTALL  : cai len TAT CA peer cua cac org lien quan
+#   3. APPROVE  : moi org "dong y" voi chaincode definition
+#   4. COMMIT   : xac nhan len channel (chi can 1 org thuc hien)
+#   5. SYNC     : deploy container CCAAS chay chaincode
+#   6. PING     : test chaincode hoat dong
+#
+# channels: chaincode nay deploy len NHUNG channel nao
+#   => Cung 1 chaincode code, nhung chay RIENG BIET tren moi channel
+#   => Data tren channel-part1 va channel-part2 la HOAN TOAN DOC LAP
+#
+# orgs: org nao install + approve chaincode nay
+#   => PHAI la subset cua channel.orgs
+#   => Endorsement policy tu dong tao: OR('nodebMSP.member','nodecMSP.member')
+#
+# Vi du:
+#   Chaincode "part" deploy len 2 channels:
+#     channel-part1 (nodeb+nodec): ca 2 org deu install, approve, chay chaincode
+#     channel-part2 (nodeb+noded): ca 2 org deu install, approve, chay chaincode
+# =============================================================================
+chaincodes:
+  - name: part
+    label: part
+    version: "1.0"
+    sequence: 1
+    image: sktdevacr.azurecr.io/part-chaincode:latest
+    replicas: 1
+    channels: [channel-part1, channel-part2]
+    orgs: [nodeb, nodec, noded]  # Tat ca org co lien quan den cac channel
+
+  - name: asset
+    label: asset
+    version: "1.0"
+    sequence: 1
+    image: sktdevacr.azurecr.io/origence-hlf-asset-chaincode:DEVELOP.2625
+    replicas: 1
+    channels: [channel-asset1, channel-asset2]
+    orgs: [nodeb, nodec, noded]  # Tat ca org co lien quan den cac channel
