@@ -531,6 +531,15 @@ FOLLOWER
     log "Channel '$CH_NAME' created successfully"
   fi
 done
+
+# Wait for all channels to be ready
+log "Waiting for all FabricMainChannels to be ready..."
+kubectl wait --timeout=300s --for=condition=Running \
+  fabricmainchannels.hlf.kungfusoftware.es --all || true
+
+log "Waiting for all FabricFollowerChannels to be ready..."
+kubectl wait --timeout=300s --for=condition=Running \
+  fabricfollowerchannels.hlf.kungfusoftware.es --all-namespaces --all || true
 fi
 
 # ==========================================================================
@@ -618,8 +627,22 @@ for (( cci=0; cci<CC_COUNT; cci++ )); do
     # Use a unique label per channel to avoid package ID collisions
     EFFECTIVE_LABEL="${CC_LABEL}-${ch_name}"
 
-    # For each org: build package, install, approve
-    for org_name in "${CC_ORGS[@]}"; do
+    # Get orgs that belong to THIS channel (intersection of CC_ORGS and channel orgs)
+    CH_ORG_COUNT=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs | length" "$CONFIG")
+    ACTIVE_ORGS=()
+    for (( ao=0; ao<CH_ORG_COUNT; ao++ )); do
+      ch_org=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[$ao]" "$CONFIG")
+      for cc_org in "${CC_ORGS[@]}"; do
+        if [[ "$ch_org" == "$cc_org" ]]; then
+          ACTIVE_ORGS+=("$ch_org")
+          break
+        fi
+      done
+    done
+    log "Channel '$ch_name' active orgs: ${ACTIVE_ORGS[*]}"
+
+    # For each org IN THIS CHANNEL: build package, install, approve
+    for org_name in "${ACTIVE_ORGS[@]}"; do
       org_ns=$(org_field "$org_name" "namespace")
       org_mspid=$(org_field "$org_name" "mspid")
       peer_count=$(org_field "$org_name" "peer_count")
@@ -670,7 +693,7 @@ CONNJSON
 
       # Build endorsement policy
       POLICY_PARTS=""
-      for on in "${CC_ORGS[@]}"; do
+      for on in "${ACTIVE_ORGS[@]}"; do
         on_mspid=$(org_field "$on" "mspid")
         if [[ -n "$POLICY_PARTS" ]]; then POLICY_PARTS+=","; fi
         POLICY_PARTS+="'${on_mspid}.member'"
@@ -693,8 +716,8 @@ CONNJSON
       rm -rf "$TMPDIR"
     done
 
-    # Commit (use first org)
-    FIRST_ORG="${CC_ORGS[0]}"
+    # Commit (use first active org)
+    FIRST_ORG="${ACTIVE_ORGS[0]}"
     first_org_ns=$(org_field "$FIRST_ORG" "namespace")
     first_org_mspid=$(org_field "$FIRST_ORG" "mspid")
 
@@ -703,7 +726,7 @@ CONNJSON
 
     # Build policy again
     POLICY_PARTS=""
-    for on in "${CC_ORGS[@]}"; do
+    for on in "${ACTIVE_ORGS[@]}"; do
       on_mspid=$(org_field "$on" "mspid")
       if [[ -n "$POLICY_PARTS" ]]; then POLICY_PARTS+=","; fi
       POLICY_PARTS+="'${on_mspid}.member'"
@@ -731,7 +754,7 @@ CONNJSON
 
     # Deploy external chaincode (CCAAS) in the first org's namespace
     # Each org that needs the chaincode running gets a deployment
-    for org_name in "${CC_ORGS[@]}"; do
+    for org_name in "${ACTIVE_ORGS[@]}"; do
       org_ns=$(org_field "$org_name" "namespace")
 
       EFFECTIVE_LABEL="${CC_LABEL}-${ch_name}"
@@ -769,7 +792,7 @@ CONNJSON2
     done
 
     # Wait for deployments
-    for org_name in "${CC_ORGS[@]}"; do
+    for org_name in "${ACTIVE_ORGS[@]}"; do
       org_ns=$(org_field "$org_name" "namespace")
       log "Waiting for deployment '${CC_NAME}-${ch_name}' in $org_ns..."
       kubectl wait --for=create "deployment/${CC_NAME}-${ch_name}" -n "$org_ns" --timeout=180s 2>/dev/null || true

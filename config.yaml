@@ -16,7 +16,7 @@ global:
   orderer_version: "3.1.3"
   ca_image: hyperledger/fabric-ca
   ca_version: "1.5.16"
-  storage_class: default
+  storage_class: sbs-15k-retain
   ca_capacity: 1Gi
   orderer_capacity: 2Gi
   peer_capacity: 5Gi
