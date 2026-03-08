@@ -522,6 +522,11 @@ ${EXTERNAL_ORDERERS}
 ${ORDERERS_TLS}
 MAINCHANNEL
 
+    # Wait for this main channel to be ready before creating followers
+    log "Waiting for FabricMainChannel '$CH_NAME' to be ready..."
+    kubectl wait --timeout=300s --for=condition=Running \
+      "fabricmainchannels.hlf.kungfusoftware.es/${CH_NAME}"
+
     # --- FabricFollowerChannel for each org in this channel ---
     IDENT_8=$(printf "%8s" "")
     ORDERER0_TLS=$(kubectl get fabricorderernodes orderer0 -n "$ORD_NS" \
@@ -579,11 +584,7 @@ FOLLOWER
   fi
 done
 
-# Wait for all channels to be ready
-log "Waiting for all FabricMainChannels to be ready..."
-kubectl wait --timeout=300s --for=condition=Running \
-  fabricmainchannels.hlf.kungfusoftware.es --all || true
-
+# Wait for all follower channels to be ready
 log "Waiting for all FabricFollowerChannels to be ready..."
 kubectl wait --timeout=300s --for=condition=Running \
   fabricfollowerchannels.hlf.kungfusoftware.es --all-namespaces --all || true
@@ -622,12 +623,31 @@ if confirm "Create network configs for all orgs?"; then
       CHANNEL_FLAGS+=" -c $ch"
     done
 
-    log "Creating network config for $ORG_NAME (channels: ${ORG_CHANNELS[*]})..."
+    # Collect ALL orgs that share channels with this org
+    ORG_FLAGS="-o $ORD_MSPID"
+    SEEN_MSPS=("$ORD_MSPID")
+    for ch in "${ORG_CHANNELS[@]}"; do
+      PEER_ORG_COUNT=$(yq eval ".channels[] | select(.name == \"$ch\") | .orgs | length" "$CONFIG")
+      for (( po=0; po<PEER_ORG_COUNT; po++ )); do
+        PEER_ORG_NAME=$(yq eval ".channels[] | select(.name == \"$ch\") | .orgs[$po].name" "$CONFIG")
+        PEER_ORG_MSPID=$(org_field "$PEER_ORG_NAME" "mspid")
+        # Add if not already seen
+        already=false
+        for seen in "${SEEN_MSPS[@]}"; do
+          if [[ "$seen" == "$PEER_ORG_MSPID" ]]; then already=true; break; fi
+        done
+        if ! $already; then
+          ORG_FLAGS+=" -o $PEER_ORG_MSPID"
+          SEEN_MSPS+=("$PEER_ORG_MSPID")
+        fi
+      done
+    done
+
+    log "Creating network config for $ORG_NAME (channels: ${ORG_CHANNELS[*]}, orgs: ${SEEN_MSPS[*]})..."
     kubectl hlf networkconfig create \
       --name="${ORG_NAME}-cp" \
       $CHANNEL_FLAGS \
-      -o "$ORG_MSPID" \
-      -o "$ORD_MSPID" \
+      $ORG_FLAGS \
       --identities="${ORG_NAME}-admin.${ORG_NS}" \
       --secret="${ORG_NAME}-cp" \
       -n "$ORG_NS"
@@ -676,7 +696,7 @@ for (( cci=0; cci<CC_COUNT; cci++ )); do
       for cc_org in "${CC_ORGS[@]}"; do
         if [[ "$ch_org" == "$cc_org" ]]; then
           # Add only if not already in list
-          local found=false
+          found=false
           for existing in "${ALL_ACTIVE_ORGS[@]+"${ALL_ACTIVE_ORGS[@]}"}"; do
             if [[ "$existing" == "$ch_org" ]]; then found=true; break; fi
           done
@@ -798,6 +818,7 @@ CONNJSON
     done
 
     log "Committing chaincode '$CC_NAME' on channel '$ch_name'..."
+    COMMIT_OK=false
     for attempt in {1..5}; do
       sleep 10
       if kubectl hlf chaincode commit \
@@ -810,6 +831,7 @@ CONNJSON
         --sequence="$CC_SEQUENCE" \
         --policy="OR(${POLICY_PARTS})" \
         --init-required=false; then
+        COMMIT_OK=true
         log "Commit succeeded"
         break
       fi
@@ -817,7 +839,10 @@ CONNJSON
     done
     rm -f "/tmp/${FIRST_ORG}-commit.yaml"
 
-    log "Chaincode '$CC_NAME' committed on channel '$ch_name'"
+    if ! $COMMIT_OK; then
+      log "ERROR: Commit failed after 5 attempts for '$CC_NAME' on '$ch_name'. Stopping."
+      exit 1
+    fi
   done
 
   # --- Deploy CCAAS: 1 deployment per org (shared across all channels) ---
