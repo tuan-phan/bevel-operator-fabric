@@ -127,50 +127,6 @@ log "Waiting for all CAs to be Running..."
 kubectl wait --timeout=180s --for=condition=Running \
   fabriccas.hlf.kungfusoftware.es --all-namespaces --all
 
-# Patch CA signing expiry from config
-CA_EXPIRY=$(y '.ca_signing.ca_expiry')
-TLS_EXPIRY=$(y '.ca_signing.tls_expiry')
-DEFAULT_EXPIRY=$(y '.ca_signing.default_expiry')
-
-if [[ "$CA_EXPIRY" != "null" ]]; then
-  log "Patching CA signing expiry: ca=$CA_EXPIRY, tls=$TLS_EXPIRY, default=$DEFAULT_EXPIRY"
-
-  SIGNING_PATCH=$(cat <<SIGPATCH
-{
-  "spec": {
-    "signing": {
-      "default": {"expiry": "${DEFAULT_EXPIRY}"},
-      "profiles": {
-        "ca": {
-          "expiry": "${CA_EXPIRY}",
-          "usage": ["digital signature", "cert sign", "crl sign"],
-          "caconstraint": {"isCA": true, "maxPathLen": 0}
-        },
-        "tls": {
-          "expiry": "${TLS_EXPIRY}",
-          "usage": ["signing", "key encipherment", "server auth", "client auth", "key agreement"]
-        }
-      }
-    }
-  }
-}
-SIGPATCH
-)
-
-  # Patch orderer CA
-  kubectl patch fabriccas.hlf.kungfusoftware.es "$ORD_CA" -n "$ORD_NS" \
-    --type=merge -p "$SIGNING_PATCH"
-  log "Patched $ORD_CA signing expiry"
-
-  # Patch all org CAs
-  for (( i=0; i<ORG_COUNT; i++ )); do
-    ORG_CA=$(y ".orgs[$i].ca_name")
-    ORG_NS=$(y ".orgs[$i].namespace")
-    kubectl patch fabriccas.hlf.kungfusoftware.es "$ORG_CA" -n "$ORG_NS" \
-      --type=merge -p "$SIGNING_PATCH"
-    log "Patched $ORG_CA signing expiry"
-  done
-fi
 fi
 
 # ==========================================================================
@@ -591,66 +547,49 @@ kubectl wait --timeout=300s --for=condition=Running \
 fi
 
 # ==========================================================================
-# STEP 6: Create Network Configs
+# STEP 6: Create Network Configs (per-channel per-org)
+# ==========================================================================
+# Each org gets one network config PER CHANNEL it participates in.
+# This prevents discovery service from pulling peers of orgs not in the channel,
+# which causes "access denied" on single-org channels like oem-group.
+#
+# Naming: {org}-{channel}-cp  (e.g., nodec-oem-group-cp)
 # ==========================================================================
 if (( START_STEP <= 6 )); then
 log "===== STEP 6: Create Network Configs ====="
 
-if confirm "Create network configs for all orgs?"; then
-  for (( oi=0; oi<ORG_COUNT; oi++ )); do
-    ORG_NAME=$(y ".orgs[$oi].name")
-    ORG_NS=$(y ".orgs[$oi].namespace")
-    ORG_MSPID=$(y ".orgs[$oi].mspid")
+if confirm "Create per-channel network configs for all orgs?"; then
+  for (( ci=0; ci<CHANNEL_COUNT; ci++ )); do
+    CH_NAME=$(y ".channels[$ci].name")
+    CH_ORG_COUNT=$(y ".channels[$ci].orgs | length")
 
-    # Collect all channels this org participates in
-    ORG_CHANNELS=()
-    for (( ci=0; ci<CHANNEL_COUNT; ci++ )); do
-      CH_NAME=$(y ".channels[$ci].name")
-      CH_ORG_COUNT=$(y ".channels[$ci].orgs | length")
-      for (( j=0; j<CH_ORG_COUNT; j++ )); do
-        if [[ "$(y ".channels[$ci].orgs[$j].name")" == "$ORG_NAME" ]]; then
-          ORG_CHANNELS+=("$CH_NAME")
-          break
-        fi
-      done
+    # Collect orgs in this channel
+    CH_ORG_NAMES=()
+    for (( j=0; j<CH_ORG_COUNT; j++ )); do
+      CH_ORG_NAMES+=( "$(y ".channels[$ci].orgs[$j].name")" )
     done
 
-    if (( ${#ORG_CHANNELS[@]} == 0 )); then continue; fi
-
-    # Use first channel for networkconfig (it will discover all)
-    CHANNEL_FLAGS=""
-    for ch in "${ORG_CHANNELS[@]}"; do
-      CHANNEL_FLAGS+=" -c $ch"
-    done
-
-    # Collect ALL orgs that share channels with this org
+    # Build -o flags: ordererMSP + only orgs in THIS channel
     ORG_FLAGS="-o $ORD_MSPID"
-    SEEN_MSPS=("$ORD_MSPID")
-    for ch in "${ORG_CHANNELS[@]}"; do
-      PEER_ORG_COUNT=$(yq eval ".channels[] | select(.name == \"$ch\") | .orgs | length" "$CONFIG")
-      for (( po=0; po<PEER_ORG_COUNT; po++ )); do
-        PEER_ORG_NAME=$(yq eval ".channels[] | select(.name == \"$ch\") | .orgs[$po].name" "$CONFIG")
-        PEER_ORG_MSPID=$(org_field "$PEER_ORG_NAME" "mspid")
-        # Add if not already seen
-        already=false
-        for seen in "${SEEN_MSPS[@]}"; do
-          if [[ "$seen" == "$PEER_ORG_MSPID" ]]; then already=true; break; fi
-        done
-        if ! $already; then
-          ORG_FLAGS+=" -o $PEER_ORG_MSPID"
-          SEEN_MSPS+=("$PEER_ORG_MSPID")
-        fi
-      done
+    for org_name in "${CH_ORG_NAMES[@]}"; do
+      org_mspid=$(org_field "$org_name" "mspid")
+      ORG_FLAGS+=" -o $org_mspid"
     done
 
-    log "Creating network config for $ORG_NAME (channels: ${ORG_CHANNELS[*]}, orgs: ${SEEN_MSPS[*]})..."
-    kubectl hlf networkconfig create \
-      --name="${ORG_NAME}-cp" \
-      $CHANNEL_FLAGS \
-      $ORG_FLAGS \
-      --identities="${ORG_NAME}-admin.${ORG_NS}" \
-      --secret="${ORG_NAME}-cp" \
-      -n "$ORG_NS"
+    # Create one network config per org in this channel
+    for org_name in "${CH_ORG_NAMES[@]}"; do
+      org_ns=$(org_field "$org_name" "namespace")
+      NC_NAME="${org_name}-${CH_NAME}-cp"
+
+      log "Creating network config '$NC_NAME' (channel: $CH_NAME, orgs: ${CH_ORG_NAMES[*]})..."
+      kubectl hlf networkconfig create \
+        --name="$NC_NAME" \
+        -c "$CH_NAME" \
+        $ORG_FLAGS \
+        --identities="${org_name}-admin.${org_ns}" \
+        --secret="$NC_NAME" \
+        -n "$org_ns"
+    done
   done
   log "All network configs created"
 fi
@@ -760,8 +699,8 @@ CONNJSON
 
       log "Package ID: $PACKAGE_ID"
 
-      # Get network config
-      kubectl get secret "${org_name}-cp" -n "$org_ns" \
+      # Get per-channel network config
+      kubectl get secret "${org_name}-${ch_name}-cp" -n "$org_ns" \
         -o jsonpath="{.data.config\.yaml}" | base64 --decode > "$TMPDIR/${org_name}.yaml"
 
       # Install on peers listed in channel config
@@ -785,12 +724,13 @@ CONNJSON
         POLICY_PARTS+="'${on_mspid}.member'"
       done
 
-      # Approve
-      log "Approving chaincode for $org_name on $ch_name..."
+      # Approve (use first peer from channel config for this org)
+      APPROVE_PEER=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[] | select(.name == \"$org_name\") | .peers[0]" "$CONFIG")
+      log "Approving chaincode for $org_name on $ch_name (peer: $APPROVE_PEER)..."
       kubectl hlf chaincode approveformyorg \
         --config="$TMPDIR/${org_name}.yaml" \
         --user="${org_name}-admin-${org_ns}" \
-        --peer="peer0.${org_ns}" \
+        --peer="${APPROVE_PEER}.${org_ns}" \
         --channel="$ch_name" \
         --name="$CC_NAME" \
         --version="$CC_VERSION" \
@@ -807,7 +747,7 @@ CONNJSON
     first_org_ns=$(org_field "$FIRST_ORG" "namespace")
     first_org_mspid=$(org_field "$FIRST_ORG" "mspid")
 
-    kubectl get secret "${FIRST_ORG}-cp" -n "$first_org_ns" \
+    kubectl get secret "${FIRST_ORG}-${ch_name}-cp" -n "$first_org_ns" \
       -o jsonpath="{.data.config\.yaml}" | base64 --decode > "/tmp/${FIRST_ORG}-commit.yaml"
 
     POLICY_PARTS=""
@@ -893,18 +833,20 @@ CONNJSON2
   sleep 15
 
   # Ping test on first channel
+  FIRST_CH="${CC_CHANNELS[0]}"
   FIRST_ORG="${ALL_ACTIVE_ORGS[0]}"
   first_org_ns=$(org_field "$FIRST_ORG" "namespace")
-  kubectl get secret "${FIRST_ORG}-cp" -n "$first_org_ns" \
+  PING_PEER=$(yq eval ".channels[] | select(.name == \"$FIRST_CH\") | .orgs[] | select(.name == \"$FIRST_ORG\") | .peers[0]" "$CONFIG")
+  kubectl get secret "${FIRST_ORG}-${FIRST_CH}-cp" -n "$first_org_ns" \
     -o jsonpath="{.data.config\.yaml}" | base64 --decode > "/tmp/${FIRST_ORG}-ping.yaml"
 
-  log "Ping test: chaincode '$CC_NAME' on channel '${CC_CHANNELS[0]}'..."
+  log "Ping test: chaincode '$CC_NAME' on channel '$FIRST_CH' (peer: $PING_PEER)..."
   kubectl hlf chaincode invoke \
     --config="/tmp/${FIRST_ORG}-ping.yaml" \
     --user="${FIRST_ORG}-admin-${first_org_ns}" \
-    --peer="peer0.${first_org_ns}" \
+    --peer="${PING_PEER}.${first_org_ns}" \
     --chaincode="$CC_NAME" \
-    --channel="${CC_CHANNELS[0]}" \
+    --channel="$FIRST_CH" \
     --fcn=Ping || log "WARNING: Ping failed (chaincode may not have Ping function)"
 
   rm -f "/tmp/${FIRST_ORG}-ping.yaml"

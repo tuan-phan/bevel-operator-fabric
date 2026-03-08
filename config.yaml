@@ -25,21 +25,6 @@ global:
   enroll_pw: enrollpw
 
 # =============================================================================
-# CA SIGNING: Certificate expiry settings for all CAs
-# =============================================================================
-# CA cert does NOT auto-renew. Set a long expiry (default: 10 years).
-# Peer/orderer/identity certs auto-renew if enabled in the operator helm values.
-#
-# ca_expiry:  CA signing profile expiry (root cert validity)
-# tls_expiry: TLS cert expiry issued by the CA
-# default_expiry: Default expiry for other certs issued by the CA
-# =============================================================================
-ca_signing:
-  ca_expiry: "87600h"            # 10 years (CA cert - no auto-renew)
-  tls_expiry: "87600h"           # 10 years
-  default_expiry: "87600h"       # 10 years
-
-# =============================================================================
 # ORDERER: Ordering service organization
 # =============================================================================
 # Orderers receive transactions, order them, and package into blocks.
@@ -127,39 +112,39 @@ channels:
   - name: oem-group
     orgs:
       - name: nodec
-        peers: [peer0, peer1]
+        peers: [peer0]
 
   - name: parts-group-01
     orgs:
       - name: nodeb
-        peers: [peer0, peer1]
+        peers: [peer0]
       - name: nodec
-        peers: [peer0, peer1]
+        peers: [peer1]
       - name: noded
-        peers: [peer0, peer1]
+        peers: [peer1]
 
   - name: asset-oem-group
     orgs:
       - name: nodec
-        peers: [peer0, peer1]
+        peers: [peer0]
 
   - name: assets-group-01
     orgs:
       - name: nodeb
-        peers: [peer0, peer1]
+        peers: [peer0]
       - name: nodec
-        peers: [peer0, peer1]
+        peers: [peer1]
       - name: noded
-        peers: [peer0, peer1]
+        peers: [peer0]
 
   - name: aircraft-group
     orgs:
       - name: nodeb
-        peers: [peer0]           # only peer0, not peer1
+        peers: [peer0]
       - name: nodec
-        peers: [peer0, peer1]
+        peers: [peer0]
       - name: noded
-        peers: [peer0]           # only peer0
+        peers: [peer0]
 
 # =============================================================================
 # CHAINCODES: Smart contracts deployed to channels
