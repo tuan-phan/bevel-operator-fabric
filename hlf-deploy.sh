@@ -622,14 +622,32 @@ for (( cci=0; cci<CC_COUNT; cci++ )); do
     continue
   fi
 
-  # --- For each channel, deploy the chaincode ---
+  # --- Collect ALL unique orgs across all channels for this chaincode ---
+  ALL_ACTIVE_ORGS=()
+  for ch_name in "${CC_CHANNELS[@]}"; do
+    CH_ORG_COUNT=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs | length" "$CONFIG")
+    for (( ao=0; ao<CH_ORG_COUNT; ao++ )); do
+      ch_org=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[$ao].name" "$CONFIG")
+      for cc_org in "${CC_ORGS[@]}"; do
+        if [[ "$ch_org" == "$cc_org" ]]; then
+          # Add only if not already in list
+          local found=false
+          for existing in "${ALL_ACTIVE_ORGS[@]+"${ALL_ACTIVE_ORGS[@]}"}"; do
+            if [[ "$existing" == "$ch_org" ]]; then found=true; break; fi
+          done
+          if ! $found; then ALL_ACTIVE_ORGS+=("$ch_org"); fi
+          break
+        fi
+      done
+    done
+  done
+  log "Chaincode '$CC_NAME' unique orgs: ${ALL_ACTIVE_ORGS[*]}"
+
+  # --- For each channel: package, install, approve, commit ---
   for ch_name in "${CC_CHANNELS[@]}"; do
     log "--- Chaincode '$CC_NAME' on channel '$ch_name' ---"
 
-    # Use a unique label per channel to avoid package ID collisions
-    EFFECTIVE_LABEL="${CC_LABEL}-${ch_name}"
-
-    # Get orgs that belong to THIS channel (intersection of CC_ORGS and channel orgs)
+    # Get orgs that belong to THIS channel
     CH_ORG_COUNT=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs | length" "$CONFIG")
     ACTIVE_ORGS=()
     for (( ao=0; ao<CH_ORG_COUNT; ao++ )); do
@@ -643,27 +661,26 @@ for (( cci=0; cci<CC_COUNT; cci++ )); do
     done
     log "Channel '$ch_name' active orgs: ${ACTIVE_ORGS[*]}"
 
-    # For each org IN THIS CHANNEL: build package, install, approve
+    # For each org IN THIS CHANNEL: package, install, approve
     for org_name in "${ACTIVE_ORGS[@]}"; do
       org_ns=$(org_field "$org_name" "namespace")
       org_mspid=$(org_field "$org_name" "mspid")
-      # Get peers for this org from channel config
       peer_count=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[] | select(.name == \"$org_name\") | .peers | length" "$CONFIG")
 
       log "Packaging chaincode for $org_name (channel: $ch_name)..."
 
-      # Build CCAAS package
+      # CCAAS package - connection points to SHARED service (1 per org, no channel suffix)
       TMPDIR=$(mktemp -d)
       cat > "$TMPDIR/metadata.json" <<METAJSON
 {
   "type": "ccaas",
-  "label": "${EFFECTIVE_LABEL}"
+  "label": "${CC_NAME}"
 }
 METAJSON
 
       cat > "$TMPDIR/connection.json" <<CONNJSON
 {
-  "address": "${CC_NAME}-${ch_name}.${org_ns}.svc.cluster.local:7052",
+  "address": "${CC_NAME}.${org_ns}.svc.cluster.local:7052",
   "dial_timeout": "10s",
   "tls_required": false
 }
@@ -674,7 +691,7 @@ CONNJSON
       PACKAGE_ID=$(kubectl hlf chaincode calculatepackageid \
         --path="$TMPDIR/chaincode.tgz" \
         --language=golang \
-        --label="$EFFECTIVE_LABEL")
+        --label="$CC_NAME")
 
       log "Package ID: $PACKAGE_ID"
 
@@ -690,12 +707,12 @@ CONNJSON
           --path="$TMPDIR/chaincode.tgz" \
           --config="$TMPDIR/${org_name}.yaml" \
           --language=golang \
-          --label="$EFFECTIVE_LABEL" \
+          --label="$CC_NAME" \
           --user="${org_name}-admin-${org_ns}" \
           --peer="${PEER_NAME}.${org_ns}"
       done
 
-      # Build endorsement policy
+      # Build endorsement policy from active orgs in this channel
       POLICY_PARTS=""
       for on in "${ACTIVE_ORGS[@]}"; do
         on_mspid=$(org_field "$on" "mspid")
@@ -704,7 +721,7 @@ CONNJSON
       done
 
       # Approve
-      log "Approving chaincode for $org_name..."
+      log "Approving chaincode for $org_name on $ch_name..."
       kubectl hlf chaincode approveformyorg \
         --config="$TMPDIR/${org_name}.yaml" \
         --user="${org_name}-admin-${org_ns}" \
@@ -728,7 +745,6 @@ CONNJSON
     kubectl get secret "${FIRST_ORG}-cp" -n "$first_org_ns" \
       -o jsonpath="{.data.config\.yaml}" | base64 --decode > "/tmp/${FIRST_ORG}-commit.yaml"
 
-    # Build policy again
     POLICY_PARTS=""
     for on in "${ACTIVE_ORGS[@]}"; do
       on_mspid=$(org_field "$on" "mspid")
@@ -756,72 +772,73 @@ CONNJSON
     done
     rm -f "/tmp/${FIRST_ORG}-commit.yaml"
 
-    # Deploy external chaincode (CCAAS) in the first org's namespace
-    # Each org that needs the chaincode running gets a deployment
-    for org_name in "${ACTIVE_ORGS[@]}"; do
-      org_ns=$(org_field "$org_name" "namespace")
+    log "Chaincode '$CC_NAME' committed on channel '$ch_name'"
+  done
 
-      EFFECTIVE_LABEL="${CC_LABEL}-${ch_name}"
-      TMPDIR=$(mktemp -d)
-      cat > "$TMPDIR/metadata.json" <<METAJSON2
+  # --- Deploy CCAAS: 1 deployment per org (shared across all channels) ---
+  for org_name in "${ALL_ACTIVE_ORGS[@]}"; do
+    org_ns=$(org_field "$org_name" "namespace")
+
+    TMPDIR=$(mktemp -d)
+    cat > "$TMPDIR/metadata.json" <<METAJSON2
 {
   "type": "ccaas",
-  "label": "${EFFECTIVE_LABEL}"
+  "label": "${CC_NAME}"
 }
 METAJSON2
-      cat > "$TMPDIR/connection.json" <<CONNJSON2
+    cat > "$TMPDIR/connection.json" <<CONNJSON2
 {
-  "address": "${CC_NAME}-${ch_name}.${org_ns}.svc.cluster.local:7052",
+  "address": "${CC_NAME}.${org_ns}.svc.cluster.local:7052",
   "dial_timeout": "10s",
   "tls_required": false
 }
 CONNJSON2
-      (cd "$TMPDIR" && tar czf code.tar.gz connection.json && tar czf chaincode.tgz metadata.json code.tar.gz)
+    (cd "$TMPDIR" && tar czf code.tar.gz connection.json && tar czf chaincode.tgz metadata.json code.tar.gz)
 
-      PACKAGE_ID=$(kubectl hlf chaincode calculatepackageid \
-        --path="$TMPDIR/chaincode.tgz" \
-        --language=golang \
-        --label="$EFFECTIVE_LABEL")
+    PACKAGE_ID=$(kubectl hlf chaincode calculatepackageid \
+      --path="$TMPDIR/chaincode.tgz" \
+      --language=golang \
+      --label="$CC_NAME")
 
-      log "Deploying CCAAS '${CC_NAME}-${ch_name}' in namespace $org_ns..."
-      kubectl hlf externalchaincode sync \
-        --image="$CC_IMAGE" \
-        --name="${CC_NAME}-${ch_name}" \
-        --namespace="$org_ns" \
-        --package-id="$PACKAGE_ID" \
-        --tls-required=false \
-        --replicas="$CC_REPLICAS"
+    log "Deploying CCAAS '${CC_NAME}' in namespace $org_ns..."
+    kubectl hlf externalchaincode sync \
+      --image="$CC_IMAGE" \
+      --name="${CC_NAME}" \
+      --namespace="$org_ns" \
+      --package-id="$PACKAGE_ID" \
+      --tls-required=false \
+      --replicas="$CC_REPLICAS"
 
-      rm -rf "$TMPDIR"
-    done
-
-    # Wait for deployments
-    for org_name in "${ACTIVE_ORGS[@]}"; do
-      org_ns=$(org_field "$org_name" "namespace")
-      log "Waiting for deployment '${CC_NAME}-${ch_name}' in $org_ns..."
-      kubectl wait --for=create "deployment/${CC_NAME}-${ch_name}" -n "$org_ns" --timeout=180s 2>/dev/null || true
-      kubectl wait --for=condition=Available "deployment/${CC_NAME}-${ch_name}" -n "$org_ns" --timeout=180s 2>/dev/null || true
-    done
-
-    sleep 15
-
-    # Ping test from first org
-    first_org_ns=$(org_field "$FIRST_ORG" "namespace")
-    kubectl get secret "${FIRST_ORG}-cp" -n "$first_org_ns" \
-      -o jsonpath="{.data.config\.yaml}" | base64 --decode > "/tmp/${FIRST_ORG}-ping.yaml"
-
-    log "Ping test: chaincode '$CC_NAME' on channel '$ch_name'..."
-    kubectl hlf chaincode invoke \
-      --config="/tmp/${FIRST_ORG}-ping.yaml" \
-      --user="${FIRST_ORG}-admin-${first_org_ns}" \
-      --peer="peer0.${first_org_ns}" \
-      --chaincode="$CC_NAME" \
-      --channel="$ch_name" \
-      --fcn=Ping || log "WARNING: Ping failed (chaincode may not have Ping function)"
-
-    rm -f "/tmp/${FIRST_ORG}-ping.yaml"
-    log "Chaincode '$CC_NAME' deployed on channel '$ch_name'"
+    rm -rf "$TMPDIR"
   done
+
+  # Wait for all deployments
+  for org_name in "${ALL_ACTIVE_ORGS[@]}"; do
+    org_ns=$(org_field "$org_name" "namespace")
+    log "Waiting for deployment '${CC_NAME}' in $org_ns..."
+    kubectl wait --for=create "deployment/${CC_NAME}" -n "$org_ns" --timeout=180s 2>/dev/null || true
+    kubectl wait --for=condition=Available "deployment/${CC_NAME}" -n "$org_ns" --timeout=180s 2>/dev/null || true
+  done
+
+  sleep 15
+
+  # Ping test on first channel
+  FIRST_ORG="${ALL_ACTIVE_ORGS[0]}"
+  first_org_ns=$(org_field "$FIRST_ORG" "namespace")
+  kubectl get secret "${FIRST_ORG}-cp" -n "$first_org_ns" \
+    -o jsonpath="{.data.config\.yaml}" | base64 --decode > "/tmp/${FIRST_ORG}-ping.yaml"
+
+  log "Ping test: chaincode '$CC_NAME' on channel '${CC_CHANNELS[0]}'..."
+  kubectl hlf chaincode invoke \
+    --config="/tmp/${FIRST_ORG}-ping.yaml" \
+    --user="${FIRST_ORG}-admin-${first_org_ns}" \
+    --peer="peer0.${first_org_ns}" \
+    --chaincode="$CC_NAME" \
+    --channel="${CC_CHANNELS[0]}" \
+    --fcn=Ping || log "WARNING: Ping failed (chaincode may not have Ping function)"
+
+  rm -f "/tmp/${FIRST_ORG}-ping.yaml"
+  log "Chaincode '$CC_NAME' fully deployed"
 done
 fi
 
