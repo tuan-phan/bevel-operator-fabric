@@ -562,7 +562,7 @@ if confirm "Create network configs for all orgs?"; then
       CH_NAME=$(y ".channels[$ci].name")
       CH_ORG_COUNT=$(y ".channels[$ci].orgs | length")
       for (( j=0; j<CH_ORG_COUNT; j++ )); do
-        if [[ "$(y ".channels[$ci].orgs[$j]")" == "$ORG_NAME" ]]; then
+        if [[ "$(y ".channels[$ci].orgs[$j].name")" == "$ORG_NAME" ]]; then
           ORG_CHANNELS+=("$CH_NAME")
           break
         fi
@@ -599,7 +599,7 @@ log "===== STEP 7: Deploy Chaincodes ====="
 
 for (( cci=0; cci<CC_COUNT; cci++ )); do
   CC_NAME=$(y ".chaincodes[$cci].name")
-  CC_LABEL=$(y ".chaincodes[$cci].label")
+  CC_LABEL="$CC_NAME"
   CC_VERSION=$(y ".chaincodes[$cci].version")
   CC_SEQUENCE=$(y ".chaincodes[$cci].sequence")
   CC_IMAGE=$(y ".chaincodes[$cci].image")
@@ -633,7 +633,7 @@ for (( cci=0; cci<CC_COUNT; cci++ )); do
     CH_ORG_COUNT=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs | length" "$CONFIG")
     ACTIVE_ORGS=()
     for (( ao=0; ao<CH_ORG_COUNT; ao++ )); do
-      ch_org=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[$ao]" "$CONFIG")
+      ch_org=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[$ao].name" "$CONFIG")
       for cc_org in "${CC_ORGS[@]}"; do
         if [[ "$ch_org" == "$cc_org" ]]; then
           ACTIVE_ORGS+=("$ch_org")
@@ -647,7 +647,8 @@ for (( cci=0; cci<CC_COUNT; cci++ )); do
     for org_name in "${ACTIVE_ORGS[@]}"; do
       org_ns=$(org_field "$org_name" "namespace")
       org_mspid=$(org_field "$org_name" "mspid")
-      peer_count=$(org_field "$org_name" "peer_count")
+      # Get peers for this org from channel config
+      peer_count=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[] | select(.name == \"$org_name\") | .peers | length" "$CONFIG")
 
       log "Packaging chaincode for $org_name (channel: $ch_name)..."
 
@@ -681,16 +682,17 @@ CONNJSON
       kubectl get secret "${org_name}-cp" -n "$org_ns" \
         -o jsonpath="{.data.config\.yaml}" | base64 --decode > "$TMPDIR/${org_name}.yaml"
 
-      # Install on all peers
+      # Install on peers listed in channel config
       for (( pi=0; pi<peer_count; pi++ )); do
-        log "Installing on peer${pi}.${org_ns}..."
+        PEER_NAME=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[] | select(.name == \"$org_name\") | .peers[$pi]" "$CONFIG")
+        log "Installing on ${PEER_NAME}.${org_ns}..."
         kubectl hlf chaincode install \
           --path="$TMPDIR/chaincode.tgz" \
           --config="$TMPDIR/${org_name}.yaml" \
           --language=golang \
           --label="$EFFECTIVE_LABEL" \
           --user="${org_name}-admin-${org_ns}" \
-          --peer="peer${pi}.${org_ns}"
+          --peer="${PEER_NAME}.${org_ns}"
       done
 
       # Build endorsement policy

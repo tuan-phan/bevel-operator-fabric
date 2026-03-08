@@ -174,20 +174,34 @@ channels:
 #     channel-part2 (nodeb+noded): ca 2 org deu install, approve, chay chaincode
 # =============================================================================
 chaincodes:
-  - name: part
-    label: part
+  - name: part-origence-chaincode
     version: "1.0"
     sequence: 1
-    image: sktdevacr.azurecr.io/part-chaincode:latest
+    image: rg.fr-par.scw.cloud/origence-common-registry/origence-hlf-chaincode:latest
     replicas: 1
-    channels: [channel-part1, channel-part2]
-    orgs: [nodeb, nodec, noded]  # Tat ca org co lien quan den cac channel
+    channels: [oem-group, parts-group-01]
+    orgs: [nodeb, nodec, noded]
 
-  - name: asset
-    label: asset
+  - name: access-origence-chaincode
     version: "1.0"
     sequence: 1
-    image: sktdevacr.azurecr.io/origence-hlf-asset-chaincode:DEVELOP.2625
+    image: rg.fr-par.scw.cloud/origence-common-registry/origence-hlf-access-chaincode:latest
     replicas: 1
-    channels: [channel-asset1, channel-asset2]
-    orgs: [nodeb, nodec, noded]  # Tat ca org co lien quan den cac channel
+    channels: [oem-group, parts-group-01, asset-oem-group, assets-group-01, aircraft-group]
+    orgs: [nodeb, nodec, noded]
+
+  - name: asset-origence-chaincode
+    version: "1.0"
+    sequence: 1
+    image: rg.fr-par.scw.cloud/origence-common-registry/origence-hlf-asset-chaincode:latest
+    replicas: 1
+    channels: [asset-oem-group, assets-group-01]
+    orgs: [nodeb, nodec, noded]
+
+  - name: aircraft-origence-chaincode
+    version: "1.0"
+    sequence: 1
+    image: rg.fr-par.scw.cloud/origence-common-registry/origence-hlf-aircraft-chaincode:latest
+    replicas: 1
+    channels: [aircraft-group]
+    orgs: [nodeb, nodec, noded]
