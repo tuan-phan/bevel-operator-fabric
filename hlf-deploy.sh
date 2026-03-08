@@ -126,6 +126,51 @@ done
 log "Waiting for all CAs to be Running..."
 kubectl wait --timeout=180s --for=condition=Running \
   fabriccas.hlf.kungfusoftware.es --all-namespaces --all
+
+# Patch CA signing expiry from config
+CA_EXPIRY=$(y '.ca_signing.ca_expiry')
+TLS_EXPIRY=$(y '.ca_signing.tls_expiry')
+DEFAULT_EXPIRY=$(y '.ca_signing.default_expiry')
+
+if [[ "$CA_EXPIRY" != "null" ]]; then
+  log "Patching CA signing expiry: ca=$CA_EXPIRY, tls=$TLS_EXPIRY, default=$DEFAULT_EXPIRY"
+
+  SIGNING_PATCH=$(cat <<SIGPATCH
+{
+  "spec": {
+    "signing": {
+      "default": {"expiry": "${DEFAULT_EXPIRY}"},
+      "profiles": {
+        "ca": {
+          "expiry": "${CA_EXPIRY}",
+          "usage": ["digital signature", "cert sign", "crl sign"],
+          "caconstraint": {"isCA": true, "maxPathLen": 0}
+        },
+        "tls": {
+          "expiry": "${TLS_EXPIRY}",
+          "usage": ["signing", "key encipherment", "server auth", "client auth", "key agreement"]
+        }
+      }
+    }
+  }
+}
+SIGPATCH
+)
+
+  # Patch orderer CA
+  kubectl patch fabriccas.hlf.kungfusoftware.es "$ORD_CA" -n "$ORD_NS" \
+    --type=merge -p "$SIGNING_PATCH"
+  log "Patched $ORD_CA signing expiry"
+
+  # Patch all org CAs
+  for (( i=0; i<ORG_COUNT; i++ )); do
+    ORG_CA=$(y ".orgs[$i].ca_name")
+    ORG_NS=$(y ".orgs[$i].namespace")
+    kubectl patch fabriccas.hlf.kungfusoftware.es "$ORG_CA" -n "$ORG_NS" \
+      --type=merge -p "$SIGNING_PATCH"
+    log "Patched $ORG_CA signing expiry"
+  done
+fi
 fi
 
 # ==========================================================================

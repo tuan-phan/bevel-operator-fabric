@@ -1,13 +1,13 @@
 # =============================================================================
 # HLF Dynamic Deployment Configuration
 # =============================================================================
-# Chay:  ./hlf-deploy.sh config.yaml
-#        ./hlf-deploy.sh config.yaml --skip-confirm    (khong hoi confirm)
-#        ./hlf-deploy.sh config.yaml --step=5           (nhay toi step 5)
+# Run:   ./hlf-deploy.sh config.yaml
+#        ./hlf-deploy.sh config.yaml --skip-confirm    (no confirmation prompts)
+#        ./hlf-deploy.sh config.yaml --step=5           (skip to step 5)
 # =============================================================================
 
 # =============================================================================
-# GLOBAL: Version cac image va storage
+# GLOBAL: Image versions, storage, and defaults
 # =============================================================================
 global:
   peer_image: hyperledger/fabric-peer
@@ -20,17 +20,31 @@ global:
   ca_capacity: 1Gi
   orderer_capacity: 2Gi
   peer_capacity: 5Gi
-  peer_statedb: couchdb     # couchdb | leveldb
+  peer_statedb: couchdb          # couchdb | leveldb
   enroll_id: enroll
   enroll_pw: enrollpw
 
 # =============================================================================
-# ORDERER: To chuc quan ly ordering service
+# CA SIGNING: Certificate expiry settings for all CAs
 # =============================================================================
-# - Orderer la thanh phan SAP XEP thu tu transaction truoc khi ghi vao block
-# - count: 3 => tao 3 node: orderer0, orderer1, orderer2 (chay consensus Raft)
-# - Ca 3 orderer dung chung 1 CA (orderer-ca) de cap chung chi
-# - 3 node dam bao fault-tolerance: 1 node chet van hoat dong (2/3 consensus)
+# CA cert does NOT auto-renew. Set a long expiry (default: 10 years).
+# Peer/orderer/identity certs auto-renew if enabled in the operator helm values.
+#
+# ca_expiry:  CA signing profile expiry (root cert validity)
+# tls_expiry: TLS cert expiry issued by the CA
+# default_expiry: Default expiry for other certs issued by the CA
+# =============================================================================
+ca_signing:
+  ca_expiry: "87600h"            # 10 years (CA cert - no auto-renew)
+  tls_expiry: "87600h"           # 10 years
+  default_expiry: "87600h"       # 10 years
+
+# =============================================================================
+# ORDERER: Ordering service organization
+# =============================================================================
+# Orderers receive transactions, order them, and package into blocks.
+# count: 3 creates orderer0, orderer1, orderer2 running Raft consensus.
+# 3 nodes ensure fault-tolerance: 1 node can fail (2/3 quorum).
 # =============================================================================
 orderer:
   namespace: orderer
@@ -38,23 +52,20 @@ orderer:
   ca_name: orderer-ca
   admin_user: ordadmin
   admin_pw: ordadminpw
-  count: 3                   # => orderer0, orderer1, orderer2
+  count: 3                       # orderer0, orderer1, orderer2
 
 # =============================================================================
-# ORGS: Cac to chuc (organization) tham gia mang luoi
+# ORGS: Peer organizations participating in the network
 # =============================================================================
-# Moi org la 1 don vi doc lap (vd: 1 cong ty, 1 phong ban)
-# - ca_name  : Certificate Authority rieng cho org (cap chung chi)
-# - peer_count: so luong peer node cua org
+# Each org is an independent entity (e.g., a company or department).
+# - ca_name:    Dedicated Certificate Authority for the org
+# - peer_count: Number of peer nodes to deploy
 #
-# PEER la gi?
-#   - Peer luu tru ban sao ledger (so cai) va chay chaincode (smart contract)
-#   - Nhieu peer = du phong cao hon + xu ly nhieu transaction hon
+# Peers store a copy of the ledger and execute chaincode (smart contracts).
+# More peers = higher redundancy + more transaction throughput.
 #
-# nodea: peer_count = 0
-#   => Chi co CA (chung chi) nhung KHONG co peer
-#   => Khong the join channel, khong the chay chaincode
-#   => Dung khi: org chi quan ly identity, hoac chua can tham gia giao dich
+# peer_count: 0 means the org only has a CA (identity management),
+# but cannot join channels or run chaincodes.
 # =============================================================================
 orgs:
   - name: nodea
@@ -63,7 +74,7 @@ orgs:
     ca_name: nodea-ca
     admin_user: admin
     admin_pw: adminpw
-    peer_count: 0            # Chi co CA, khong co peer
+    peer_count: 0                # CA only, no peers
 
   - name: nodeb
     namespace: nodeb
@@ -71,7 +82,7 @@ orgs:
     ca_name: nodeb-ca
     admin_user: admin
     admin_pw: adminpw
-    peer_count: 2            # peer0, peer1
+    peer_count: 2                # peer0, peer1
 
   - name: nodec
     namespace: nodec
@@ -79,7 +90,7 @@ orgs:
     ca_name: nodec-ca
     admin_user: admin
     admin_pw: adminpw
-    peer_count: 2            # peer0, peer1
+    peer_count: 2                # peer0, peer1
 
   - name: noded
     namespace: noded
@@ -87,26 +98,31 @@ orgs:
     ca_name: noded-ca
     admin_user: admin
     admin_pw: adminpw
-    peer_count: 2            # peer0, peer1
+    peer_count: 2                # peer0, peer1
 
 # =============================================================================
-# CHANNELS: Kenh giao tiep giua cac org
+# CHANNEL CONFIG: Default settings applied to all channels
 # =============================================================================
-# batchTimeout: Orderer doi bao lau truoc khi dong 1 block (0.5s = nhanh)
-# maxMessageCount: So transaction toi da trong 1 block (200)
+# batchTimeout: Max time orderer waits before cutting a block (lower = faster)
+# batchSize.maxMessageCount: Max transactions per block
 # =============================================================================
 channel_config:
   batch_timeout: "0.5s"
   batch_size:
     max_message_count: 200
-    absolute_max_bytes: 1048576
-    preferred_max_bytes: 524288
+    absolute_max_bytes: 1048576   # 1 MB
+    preferred_max_bytes: 524288   # 512 KB
 
-# peers: chi dinh CU THE peer nao join channel
-#   Neu KHONG co peers => tu dong join TAT CA peer cua org do
-#   Neu CO peers       => chi join cac peer duoc list
+# =============================================================================
+# CHANNELS: Private communication channels between orgs
+# =============================================================================
+# A channel is a private ledger shared only by its member orgs.
+# One org can participate in multiple channels.
+# Data on different channels is completely isolated.
 #
-# Vi du: aircraft-group, nodeb chi can peer0, khong can peer1
+# peers: Specify exactly which peers join this channel.
+#   e.g., aircraft-group: nodeb only needs peer0, not peer1.
+# =============================================================================
 channels:
   - name: oem-group
     orgs:
@@ -139,39 +155,29 @@ channels:
   - name: aircraft-group
     orgs:
       - name: nodeb
-        peers: [peer0]          # chi peer0, KHONG add peer1
+        peers: [peer0]           # only peer0, not peer1
       - name: nodec
         peers: [peer0, peer1]
       - name: noded
-        peers: [peer0]          # chi peer0
+        peers: [peer0]           # only peer0
 
 # =============================================================================
-# CHAINCODES: Smart contract deploy len cac channel
+# CHAINCODES: Smart contracts deployed to channels
 # =============================================================================
-# CHAINCODE la gi?
-#   - Code chay tren peer, xu ly business logic (doc/ghi ledger)
-#   - Deploy theo kieu CCAAS (Chaincode-as-a-Service): chay nhu 1 container rieng
+# Deployed as CCAAS (Chaincode-as-a-Service): runs as a separate container.
+# One deployment per org serves all channels (shared service).
 #
-# Quy trinh deploy 1 chaincode:
-#   1. PACKAGE  : dong goi code thanh file .tgz
-#   2. INSTALL  : cai len TAT CA peer cua cac org lien quan
-#   3. APPROVE  : moi org "dong y" voi chaincode definition
-#   4. COMMIT   : xac nhan len channel (chi can 1 org thuc hien)
-#   5. SYNC     : deploy container CCAAS chay chaincode
-#   6. PING     : test chaincode hoat dong
+# Deploy lifecycle:
+#   1. PACKAGE  - Build .tgz with connection info
+#   2. INSTALL  - Install package on all peers of active orgs
+#   3. APPROVE  - Each org approves the chaincode definition
+#   4. COMMIT   - Finalize definition on the channel
+#   5. SYNC     - Deploy CCAAS container (1 per org, shared across channels)
+#   6. PING     - Verify chaincode is operational
 #
-# channels: chaincode nay deploy len NHUNG channel nao
-#   => Cung 1 chaincode code, nhung chay RIENG BIET tren moi channel
-#   => Data tren channel-part1 va channel-part2 la HOAN TOAN DOC LAP
-#
-# orgs: org nao install + approve chaincode nay
-#   => PHAI la subset cua channel.orgs
-#   => Endorsement policy tu dong tao: OR('nodebMSP.member','nodecMSP.member')
-#
-# Vi du:
-#   Chaincode "part" deploy len 2 channels:
-#     channel-part1 (nodeb+nodec): ca 2 org deu install, approve, chay chaincode
-#     channel-part2 (nodeb+noded): ca 2 org deu install, approve, chay chaincode
+# orgs: Which orgs install + approve (must be a subset of each channel's orgs).
+#   Script automatically filters to only orgs present in each channel.
+#   Endorsement policy auto-generated: OR('org1MSP.member','org2MSP.member',...)
 # =============================================================================
 chaincodes:
   - name: part-origence-chaincode
