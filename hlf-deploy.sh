@@ -362,11 +362,11 @@ log "Channel config: batchTimeout=$BATCH_TIMEOUT, maxMessageCount=$MAX_MSG_COUNT
 for (( ci=0; ci<CHANNEL_COUNT; ci++ )); do
   CH_NAME=$(y ".channels[$ci].name")
 
-  # Get org names for this channel
+  # Get org names for this channel (orgs are now objects with .name and .peers)
   CH_ORG_COUNT=$(y ".channels[$ci].orgs | length")
   CH_ORG_NAMES=()
   for (( j=0; j<CH_ORG_COUNT; j++ )); do
-    CH_ORG_NAMES+=( "$(y ".channels[$ci].orgs[$j]")" )
+    CH_ORG_NAMES+=( "$(y ".channels[$ci].orgs[$j].name")" )
   done
 
   if confirm "Create channel '$CH_NAME' with orgs: ${CH_ORG_NAMES[*]}?"; then
@@ -482,15 +482,17 @@ MAINCHANNEL
     ORDERER0_TLS=$(kubectl get fabricorderernodes orderer0 -n "$ORD_NS" \
       -o jsonpath='{.status.tlsCert}' | sed -e "s/^/${IDENT_8}/")
 
-    for org_name in "${CH_ORG_NAMES[@]}"; do
+    for (( oi=0; oi<CH_ORG_COUNT; oi++ )); do
+      org_name=$(y ".channels[$ci].orgs[$oi].name")
       org_ns=$(org_field "$org_name" "namespace")
       org_mspid=$(org_field "$org_name" "mspid")
-      peer_count=$(org_field "$org_name" "peer_count")
 
-      # Build peersToJoin
+      # Build peersToJoin from explicit peers list in channel config
       PEERS_TO_JOIN=""
-      for (( pi=0; pi<peer_count; pi++ )); do
-        PEERS_TO_JOIN+="    - name: peer${pi}"$'\n'
+      PEER_LIST_COUNT=$(y ".channels[$ci].orgs[$oi].peers | length")
+      for (( pi=0; pi<PEER_LIST_COUNT; pi++ )); do
+        PEER_NAME=$(y ".channels[$ci].orgs[$oi].peers[$pi]")
+        PEERS_TO_JOIN+="    - name: ${PEER_NAME}"$'\n'
         PEERS_TO_JOIN+="      namespace: ${org_ns}"$'\n'
       done
 

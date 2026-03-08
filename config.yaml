@@ -102,18 +102,48 @@ channel_config:
     absolute_max_bytes: 1048576
     preferred_max_bytes: 524288
 
+# peers: chi dinh CU THE peer nao join channel
+#   Neu KHONG co peers => tu dong join TAT CA peer cua org do
+#   Neu CO peers       => chi join cac peer duoc list
+#
+# Vi du: aircraft-group, nodeb chi can peer0, khong can peer1
 channels:
-  - name: channel-part1
-    orgs: [nodeb, nodec]
+  - name: oem-group
+    orgs:
+      - name: nodec
+        peers: [peer0, peer1]
 
-  - name: channel-part2
-    orgs: [nodeb, noded]
+  - name: parts-group-01
+    orgs:
+      - name: nodeb
+        peers: [peer0, peer1]
+      - name: nodec
+        peers: [peer0, peer1]
+      - name: noded
+        peers: [peer0, peer1]
 
-  - name: channel-asset1
-    orgs: [nodeb, nodec]
+  - name: asset-oem-group
+    orgs:
+      - name: nodec
+        peers: [peer0, peer1]
 
-  - name: channel-asset2
-    orgs: [nodeb, noded]
+  - name: assets-group-01
+    orgs:
+      - name: nodeb
+        peers: [peer0, peer1]
+      - name: nodec
+        peers: [peer0, peer1]
+      - name: noded
+        peers: [peer0, peer1]
+
+  - name: aircraft-group
+    orgs:
+      - name: nodeb
+        peers: [peer0]          # chi peer0, KHONG add peer1
+      - name: nodec
+        peers: [peer0, peer1]
+      - name: noded
+        peers: [peer0]          # chi peer0
 
 # =============================================================================
 # CHAINCODES: Smart contract deploy len cac channel
