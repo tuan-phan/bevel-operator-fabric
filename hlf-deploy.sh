@@ -580,11 +580,24 @@ if confirm "Create per-channel network configs for all orgs?"; then
       org_mspid=$(org_field "$org_name" "mspid")
       NC_NAME="${org_name}-${CH_NAME}-cp"
 
-      # Build organizations list (orderer + channel orgs)
+      # Build organizations list and namespaces (orderer + channel orgs)
       ORGS_BLOCK="    - ${ORD_MSPID}"$'\n'
+      NS_BLOCK="    - ${ORD_NS}"$'\n'
+      SEEN_NS=("$ORD_NS")
       for (( j=0; j<CH_ORG_COUNT; j++ )); do
-        ch_org_mspid=$(org_field "$(y ".channels[$ci].orgs[$j].name")" "mspid")
+        ch_org_name=$(y ".channels[$ci].orgs[$j].name")
+        ch_org_mspid=$(org_field "$ch_org_name" "mspid")
+        ch_org_ns=$(org_field "$ch_org_name" "namespace")
         ORGS_BLOCK+="    - ${ch_org_mspid}"$'\n'
+        # Add namespace if not already seen
+        ns_seen=false
+        for seen in "${SEEN_NS[@]}"; do
+          if [[ "$seen" == "$ch_org_ns" ]]; then ns_seen=true; break; fi
+        done
+        if ! $ns_seen; then
+          NS_BLOCK+="    - ${ch_org_ns}"$'\n'
+          SEEN_NS+=("$ch_org_ns")
+        fi
       done
 
       # Build organizationConfig: map each org to its channel-specific peers
@@ -614,6 +627,8 @@ metadata:
 spec:
   organization: ${org_mspid}
   internal: true
+  namespaces:
+${NS_BLOCK}
   organizations:
 ${ORGS_BLOCK}
   channels:
