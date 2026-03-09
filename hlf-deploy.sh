@@ -560,8 +560,8 @@ fi
 # STEP 6: Create Network Configs (per-channel per-org)
 # ==========================================================================
 # Each org gets one network config PER CHANNEL it participates in.
-# This prevents discovery service from pulling peers of orgs not in the channel,
-# which causes "access denied" on single-org channels like oem-group.
+# Uses organizationConfig to specify ONLY the peers joined to each channel,
+# preventing discovery from returning non-channel peers ("access denied").
 #
 # Naming: {org}-{channel}-cp  (e.g., nodec-oem-group-cp)
 # ==========================================================================
@@ -573,34 +573,63 @@ if confirm "Create per-channel network configs for all orgs?"; then
     CH_NAME=$(y ".channels[$ci].name")
     CH_ORG_COUNT=$(y ".channels[$ci].orgs | length")
 
-    # Collect orgs in this channel
-    CH_ORG_NAMES=()
-    for (( j=0; j<CH_ORG_COUNT; j++ )); do
-      CH_ORG_NAMES+=( "$(y ".channels[$ci].orgs[$j].name")" )
-    done
-
-    # Build -o flags: ordererMSP + only orgs in THIS channel
-    ORG_FLAGS="-o $ORD_MSPID"
-    for org_name in "${CH_ORG_NAMES[@]}"; do
-      org_mspid=$(org_field "$org_name" "mspid")
-      ORG_FLAGS+=" -o $org_mspid"
-    done
-
-    # Create one network config per org in this channel
-    for org_name in "${CH_ORG_NAMES[@]}"; do
+    # For each org in this channel, create a dedicated network config
+    for (( oi=0; oi<CH_ORG_COUNT; oi++ )); do
+      org_name=$(y ".channels[$ci].orgs[$oi].name")
       org_ns=$(org_field "$org_name" "namespace")
+      org_mspid=$(org_field "$org_name" "mspid")
       NC_NAME="${org_name}-${CH_NAME}-cp"
 
-      log "Creating network config '$NC_NAME' (channel: $CH_NAME, orgs: ${CH_ORG_NAMES[*]})..."
-      kubectl hlf networkconfig create \
-        --name="$NC_NAME" \
-        -c "$CH_NAME" \
-        $ORG_FLAGS \
-        --identities="${org_name}-admin.${org_ns}" \
-        --secret="$NC_NAME" \
-        -n "$org_ns"
+      # Build organizations list (orderer + channel orgs)
+      ORGS_BLOCK="    - ${ORD_MSPID}"$'\n'
+      for (( j=0; j<CH_ORG_COUNT; j++ )); do
+        ch_org_mspid=$(org_field "$(y ".channels[$ci].orgs[$j].name")" "mspid")
+        ORGS_BLOCK+="    - ${ch_org_mspid}"$'\n'
+      done
+
+      # Build organizationConfig: map each org to its channel-specific peers
+      ORG_CONFIG_BLOCK=""
+      for (( j=0; j<CH_ORG_COUNT; j++ )); do
+        ch_org_name=$(y ".channels[$ci].orgs[$j].name")
+        ch_org_ns=$(org_field "$ch_org_name" "namespace")
+        ch_org_mspid=$(org_field "$ch_org_name" "mspid")
+        PEER_LIST_COUNT=$(y ".channels[$ci].orgs[$j].peers | length")
+
+        ORG_CONFIG_BLOCK+="    ${ch_org_mspid}:"$'\n'
+        ORG_CONFIG_BLOCK+="      peers:"$'\n'
+        for (( pi=0; pi<PEER_LIST_COUNT; pi++ )); do
+          PEER_NAME=$(y ".channels[$ci].orgs[$j].peers[$pi]")
+          ORG_CONFIG_BLOCK+="        - name: ${PEER_NAME}"$'\n'
+          ORG_CONFIG_BLOCK+="          namespace: ${ch_org_ns}"$'\n'
+        done
+      done
+
+      log "Creating network config '$NC_NAME' (channel: $CH_NAME, peers filtered per org)..."
+      kubectl apply -f - <<NETCONFIG
+apiVersion: hlf.kungfusoftware.es/v1alpha1
+kind: FabricNetworkConfig
+metadata:
+  name: ${NC_NAME}
+  namespace: ${org_ns}
+spec:
+  organization: ${org_mspid}
+  internal: true
+  organizations:
+${ORGS_BLOCK}
+  channels:
+    - ${CH_NAME}
+  identities:
+    - name: ${org_name}-admin
+      namespace: ${org_ns}
+  secretName: ${NC_NAME}
+  organizationConfig:
+${ORG_CONFIG_BLOCK}
+NETCONFIG
     done
   done
+
+  # Wait for network config secrets to be generated
+  sleep 10
   log "All network configs created"
 fi
 fi
