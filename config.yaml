@@ -53,14 +53,6 @@ orderer:
 # but cannot join channels or run chaincodes.
 # =============================================================================
 orgs:
-  - name: nodea
-    namespace: nodea
-    mspid: nodeaMSP
-    ca_name: nodea-ca
-    admin_user: admin
-    admin_pw: adminpw
-    peer_count: 0                # CA only, no peers
-
   - name: nodeb
     namespace: nodeb
     mspid: nodebMSP

@@ -124,7 +124,7 @@ for (( i=0; i<ORG_COUNT; i++ )); do
 done
 
 log "Waiting for all CAs to be Running..."
-kubectl wait --timeout=180s --for=condition=Running \
+kubectl wait --timeout=600s --for=condition=Running \
   fabriccas.hlf.kungfusoftware.es --all-namespaces --all
 
 fi
@@ -170,7 +170,7 @@ if confirm "Register and deploy $ORD_COUNT orderer nodes?"; then
   done
 
   log "Waiting for all orderer nodes to be Running..."
-  kubectl wait --timeout=180s --for=condition=Running \
+  kubectl wait --timeout=600s --for=condition=Running \
     fabricorderernodes.hlf.kungfusoftware.es --all-namespaces --all
 fi
 fi
@@ -225,8 +225,16 @@ for (( oi=0; oi<ORG_COUNT; oi++ )); do
 done
 
 log "Waiting for all peers to be Running..."
-kubectl wait --timeout=180s --for=condition=Running \
-  fabricpeers.hlf.kungfusoftware.es --all-namespaces --all
+for (( oi=0; oi<ORG_COUNT; oi++ )); do
+  ORG_NAME=$(y ".orgs[$oi].name")
+  ORG_NS=$(y ".orgs[$oi].namespace")
+  PEER_COUNT=$(y ".orgs[$oi].peer_count")
+  for (( pi=0; pi<PEER_COUNT; pi++ )); do
+    log "Waiting for peer${pi} in $ORG_NS..."
+    kubectl wait --timeout=600s --for=condition=Running \
+      "fabricpeers.hlf.kungfusoftware.es/peer${pi}" -n "$ORG_NS"
+  done
+done
 fi
 
 # ==========================================================================
@@ -502,8 +510,10 @@ MAINCHANNEL
         PEERS_TO_JOIN+="      namespace: ${org_ns}"$'\n'
       done
 
+      # Use first peer from channel config as anchor peer
+      ANCHOR_PEER=$(y ".channels[$ci].orgs[$oi].peers[0]")
       FOLLOWER_NAME="${CH_NAME}-${org_name}"
-      log "Applying FabricFollowerChannel: $FOLLOWER_NAME"
+      log "Applying FabricFollowerChannel: $FOLLOWER_NAME (anchor: $ANCHOR_PEER)"
 
       kubectl apply -f - <<FOLLOWER
 apiVersion: hlf.kungfusoftware.es/v1alpha1
@@ -516,7 +526,7 @@ spec:
   mspId: ${org_mspid}
 
   anchorPeers:
-    - host: peer0.${org_ns}.svc.cluster.local
+    - host: ${ANCHOR_PEER}.${org_ns}.svc.cluster.local
       port: 7051
 
   hlfIdentity:
@@ -826,8 +836,8 @@ CONNJSON2
   for org_name in "${ALL_ACTIVE_ORGS[@]}"; do
     org_ns=$(org_field "$org_name" "namespace")
     log "Waiting for deployment '${CC_NAME}' in $org_ns..."
-    kubectl wait --for=create "deployment/${CC_NAME}" -n "$org_ns" --timeout=180s 2>/dev/null || true
-    kubectl wait --for=condition=Available "deployment/${CC_NAME}" -n "$org_ns" --timeout=180s 2>/dev/null || true
+    kubectl wait --for=create "deployment/${CC_NAME}" -n "$org_ns" --timeout=600s 2>/dev/null || true
+    kubectl wait --for=condition=Available "deployment/${CC_NAME}" -n "$org_ns" --timeout=600s 2>/dev/null || true
   done
 
   sleep 15
