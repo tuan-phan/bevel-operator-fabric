@@ -884,26 +884,24 @@ CONNJSON2
     kubectl wait --for=condition=Available "deployment/${CC_NAME}" -n "$org_ns" --timeout=600s 2>/dev/null || true
   done
 
-  sleep 15
-
-  # Ping test on first channel
+  # Verify: querycommitted on first channel
   FIRST_CH="${CC_CHANNELS[0]}"
-  FIRST_ORG="${ALL_ACTIVE_ORGS[0]}"
+  FIRST_ORG="${ACTIVE_ORGS[0]}"
   first_org_ns=$(org_field "$FIRST_ORG" "namespace")
-  PING_PEER=$(yq eval ".channels[] | select(.name == \"$FIRST_CH\") | .orgs[] | select(.name == \"$FIRST_ORG\") | .peers[0]" "$CONFIG")
+  VERIFY_PEER=$(yq eval ".channels[] | select(.name == \"$FIRST_CH\") | .orgs[] | select(.name == \"$FIRST_ORG\") | .peers[0]" "$CONFIG")
+
+  TMPDIR_VERIFY=$(mktemp -d)
   kubectl get secret "${FIRST_ORG}-${FIRST_CH}-cp" -n "$first_org_ns" \
-    -o jsonpath="{.data.config\.yaml}" | base64 --decode > "/tmp/${FIRST_ORG}-ping.yaml"
+    -o jsonpath="{.data.config\.yaml}" | base64 --decode > "$TMPDIR_VERIFY/nc.yaml"
 
-  log "Ping test: chaincode '$CC_NAME' on channel '$FIRST_CH' (peer: $PING_PEER)..."
-  kubectl hlf chaincode invoke \
-    --config="/tmp/${FIRST_ORG}-ping.yaml" \
+  log "Verifying committed chaincode '$CC_NAME' on channel '$FIRST_CH'..."
+  kubectl hlf chaincode querycommitted \
+    --config="$TMPDIR_VERIFY/nc.yaml" \
     --user="${FIRST_ORG}-admin-${first_org_ns}" \
-    --peer="${PING_PEER}.${first_org_ns}" \
-    --chaincode="$CC_NAME" \
-    --channel="$FIRST_CH" \
-    --fcn=Ping || log "WARNING: Ping failed (chaincode may not have Ping function)"
+    --peer="${VERIFY_PEER}.${first_org_ns}" \
+    --channel="$FIRST_CH" || log "WARNING: querycommitted failed"
 
-  rm -f "/tmp/${FIRST_ORG}-ping.yaml"
+  rm -rf "$TMPDIR_VERIFY"
   log "Chaincode '$CC_NAME' fully deployed"
 done
 fi
