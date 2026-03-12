@@ -346,13 +346,11 @@ build_external_orderers_to_join() {
 }
 
 build_orderers_tls() {
-  local IDENT_8
-  IDENT_8=$(printf "%8s" "")
   local result=""
   for (( i=0; i<ORD_COUNT; i++ )); do
     local TLS_CERT
     TLS_CERT=$(kubectl get fabricorderernodes "orderer${i}" -n "$ORD_NS" \
-      -o jsonpath='{.status.tlsCert}' | sed -e "s/^/${IDENT_8}/")
+      -o jsonpath='{.status.tlsCert}' | sed '/^[[:space:]]*$/d' | awk '{printf "        %s\n", $0}')
     result+="    - host: orderer${i}.${ORD_NS}"$'\n'
     result+="      port: 7050"$'\n'
     result+="      tlsCert: |-"$'\n'
@@ -494,9 +492,8 @@ MAINCHANNEL
       "fabricmainchannels.hlf.kungfusoftware.es/${CH_NAME}"
 
     # --- FabricFollowerChannel for each org in this channel ---
-    IDENT_8=$(printf "%8s" "")
     ORDERER0_TLS=$(kubectl get fabricorderernodes orderer0 -n "$ORD_NS" \
-      -o jsonpath='{.status.tlsCert}' | sed -e "s/^/${IDENT_8}/")
+      -o jsonpath='{.status.tlsCert}' | sed '/^[[:space:]]*$/d' | awk '{printf "        %s\n", $0}')
 
     for (( oi=0; oi<CH_ORG_COUNT; oi++ )); do
       org_name=$(y ".channels[$ci].orgs[$oi].name")
