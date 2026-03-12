@@ -389,6 +389,8 @@ for (( ci=0; ci<CHANNEL_COUNT; ci++ )); do
       org_mspid=$(org_field "$org_name" "mspid")
       org_ca=$(org_field "$org_name" "ca_name")
 
+      log "Building channel '$CH_NAME' - org: $org_name, mspid: $org_mspid, ca: $org_ca, ns: $org_ns"
+
       PEER_ORGS_BLOCK+="    - mspID: ${org_mspid}"$'\n'
       PEER_ORGS_BLOCK+="      caName: ${org_ca}"$'\n'
       PEER_ORGS_BLOCK+="      caNamespace: ${org_ns}"$'\n'
@@ -701,7 +703,45 @@ for (( cci=0; cci<CC_COUNT; cci++ )); do
   done
   log "Chaincode '$CC_NAME' unique orgs: ${ALL_ACTIVE_ORGS[*]}"
 
-  # --- For each channel: package, install, approve, commit ---
+  # --- Pre-build chaincode package ONCE per org (reused for install + deploy) ---
+  # This ensures the same package ID is used everywhere.
+  # tar czf output varies between invocations due to timestamps, so we must
+  # create each package exactly once and reuse the artifact.
+  declare -A ORG_PKG_DIR    # org_name -> tmpdir containing chaincode.tgz
+  declare -A ORG_PKG_ID     # org_name -> package ID
+
+  for org_name in "${ALL_ACTIVE_ORGS[@]}"; do
+    org_ns=$(org_field "$org_name" "namespace")
+    TMPDIR=$(mktemp -d)
+
+    cat > "$TMPDIR/metadata.json" <<METAJSON
+{
+  "type": "ccaas",
+  "label": "${CC_NAME}"
+}
+METAJSON
+
+    cat > "$TMPDIR/connection.json" <<CONNJSON
+{
+  "address": "${CC_NAME}.${org_ns}.svc.cluster.local:7052",
+  "dial_timeout": "10s",
+  "tls_required": false
+}
+CONNJSON
+
+    (cd "$TMPDIR" && tar czf code.tar.gz connection.json && tar czf chaincode.tgz metadata.json code.tar.gz)
+
+    PACKAGE_ID=$(kubectl hlf chaincode calculatepackageid \
+      --path="$TMPDIR/chaincode.tgz" \
+      --language=golang \
+      --label="$CC_NAME")
+
+    ORG_PKG_DIR["$org_name"]="$TMPDIR"
+    ORG_PKG_ID["$org_name"]="$PACKAGE_ID"
+    log "Pre-built package for $org_name: $PACKAGE_ID"
+  done
+
+  # --- For each channel: install, approve, commit ---
   for ch_name in "${CC_CHANNELS[@]}"; do
     log "--- Chaincode '$CC_NAME' on channel '$ch_name' ---"
 
@@ -719,51 +759,61 @@ for (( cci=0; cci<CC_COUNT; cci++ )); do
     done
     log "Channel '$ch_name' active orgs: ${ACTIVE_ORGS[*]}"
 
-    # For each org IN THIS CHANNEL: package, install, approve
+    # Auto-detect current sequence for this chaincode on this channel
+    FIRST_CHECK_ORG="${ACTIVE_ORGS[0]}"
+    first_check_ns=$(org_field "$FIRST_CHECK_ORG" "namespace")
+    FIRST_CHECK_PEER=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[] | select(.name == \"$FIRST_CHECK_ORG\") | .peers[0]" "$CONFIG")
+
+    # Try to get current committed sequence
+    TMPDIR_SEQ=$(mktemp -d)
+    kubectl get secret "${FIRST_CHECK_ORG}-${ch_name}-cp" -n "$first_check_ns" \
+      -o jsonpath="{.data.config\.yaml}" | base64 --decode > "$TMPDIR_SEQ/check.yaml" 2>/dev/null || true
+
+    CURRENT_SEQUENCE=0
+    if [[ -f "$TMPDIR_SEQ/check.yaml" ]]; then
+      QUERY_OUTPUT=$(kubectl hlf chaincode querycommitted \
+        --config="$TMPDIR_SEQ/check.yaml" \
+        --user="${FIRST_CHECK_ORG}-admin-${first_check_ns}" \
+        --peer="${FIRST_CHECK_PEER}.${first_check_ns}" \
+        --channel="$ch_name" \
+        --chaincode="$CC_NAME" 2>/dev/null | tail -n +2 | awk '{print $3}' | head -1 || echo "0")
+
+      if [[ -n "$QUERY_OUTPUT" && "$QUERY_OUTPUT" =~ ^[0-9]+$ ]]; then
+        CURRENT_SEQUENCE=$QUERY_OUTPUT
+      fi
+    fi
+    rm -rf "$TMPDIR_SEQ"
+
+    # Determine sequence to use
+    if (( CURRENT_SEQUENCE > 0 )); then
+      CC_SEQUENCE=$((CURRENT_SEQUENCE + 1))
+      log "Chaincode '$CC_NAME' already exists on '$ch_name' with sequence $CURRENT_SEQUENCE. Using sequence $CC_SEQUENCE for update."
+    else
+      CC_SEQUENCE=$(y ".chaincodes[$cci].sequence")
+      log "Chaincode '$CC_NAME' not found on '$ch_name'. Using initial sequence $CC_SEQUENCE."
+    fi
+
+    # For each org IN THIS CHANNEL: install, approve (reuse pre-built package)
     for org_name in "${ACTIVE_ORGS[@]}"; do
       org_ns=$(org_field "$org_name" "namespace")
       org_mspid=$(org_field "$org_name" "mspid")
       peer_count=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[] | select(.name == \"$org_name\") | .peers | length" "$CONFIG")
 
-      log "Packaging chaincode for $org_name (channel: $ch_name)..."
-
-      # CCAAS package - connection points to SHARED service (1 per org, no channel suffix)
-      TMPDIR=$(mktemp -d)
-      cat > "$TMPDIR/metadata.json" <<METAJSON
-{
-  "type": "ccaas",
-  "label": "${CC_NAME}"
-}
-METAJSON
-
-      cat > "$TMPDIR/connection.json" <<CONNJSON
-{
-  "address": "${CC_NAME}.${org_ns}.svc.cluster.local:7052",
-  "dial_timeout": "10s",
-  "tls_required": false
-}
-CONNJSON
-
-      (cd "$TMPDIR" && tar czf code.tar.gz connection.json && tar czf chaincode.tgz metadata.json code.tar.gz)
-
-      PACKAGE_ID=$(kubectl hlf chaincode calculatepackageid \
-        --path="$TMPDIR/chaincode.tgz" \
-        --language=golang \
-        --label="$CC_NAME")
-
-      log "Package ID: $PACKAGE_ID"
+      PKG_DIR="${ORG_PKG_DIR["$org_name"]}"
+      PACKAGE_ID="${ORG_PKG_ID["$org_name"]}"
+      log "Using pre-built package for $org_name: $PACKAGE_ID"
 
       # Get per-channel network config
       kubectl get secret "${org_name}-${ch_name}-cp" -n "$org_ns" \
-        -o jsonpath="{.data.config\.yaml}" | base64 --decode > "$TMPDIR/${org_name}.yaml"
+        -o jsonpath="{.data.config\.yaml}" | base64 --decode > "$PKG_DIR/${org_name}-${ch_name}.yaml"
 
       # Install on peers listed in channel config
       for (( pi=0; pi<peer_count; pi++ )); do
         PEER_NAME=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[] | select(.name == \"$org_name\") | .peers[$pi]" "$CONFIG")
         log "Installing on ${PEER_NAME}.${org_ns}..."
         kubectl hlf chaincode install \
-          --path="$TMPDIR/chaincode.tgz" \
-          --config="$TMPDIR/${org_name}.yaml" \
+          --path="$PKG_DIR/chaincode.tgz" \
+          --config="$PKG_DIR/${org_name}-${ch_name}.yaml" \
           --language=golang \
           --label="$CC_NAME" \
           --user="${org_name}-admin-${org_ns}" \
@@ -782,7 +832,7 @@ CONNJSON
       APPROVE_PEER=$(yq eval ".channels[] | select(.name == \"$ch_name\") | .orgs[] | select(.name == \"$org_name\") | .peers[0]" "$CONFIG")
       log "Approving chaincode for $org_name on $ch_name (peer: $APPROVE_PEER)..."
       kubectl hlf chaincode approveformyorg \
-        --config="$TMPDIR/${org_name}.yaml" \
+        --config="$PKG_DIR/${org_name}-${ch_name}.yaml" \
         --user="${org_name}-admin-${org_ns}" \
         --peer="${APPROVE_PEER}.${org_ns}" \
         --channel="$ch_name" \
@@ -792,8 +842,6 @@ CONNJSON
         --package-id="$PACKAGE_ID" \
         --policy="OR(${POLICY_PARTS})" \
         --init-required=false
-
-      rm -rf "$TMPDIR"
     done
 
     # Commit (use first active org)
@@ -839,32 +887,12 @@ CONNJSON
     fi
   done
 
-  # --- Deploy CCAAS: 1 deployment per org (shared across all channels) ---
+  # --- Deploy CCAAS: 1 deployment per org (reuse pre-built package) ---
   for org_name in "${ALL_ACTIVE_ORGS[@]}"; do
     org_ns=$(org_field "$org_name" "namespace")
+    PACKAGE_ID="${ORG_PKG_ID["$org_name"]}"
 
-    TMPDIR=$(mktemp -d)
-    cat > "$TMPDIR/metadata.json" <<METAJSON2
-{
-  "type": "ccaas",
-  "label": "${CC_NAME}"
-}
-METAJSON2
-    cat > "$TMPDIR/connection.json" <<CONNJSON2
-{
-  "address": "${CC_NAME}.${org_ns}.svc.cluster.local:7052",
-  "dial_timeout": "10s",
-  "tls_required": false
-}
-CONNJSON2
-    (cd "$TMPDIR" && tar czf code.tar.gz connection.json && tar czf chaincode.tgz metadata.json code.tar.gz)
-
-    PACKAGE_ID=$(kubectl hlf chaincode calculatepackageid \
-      --path="$TMPDIR/chaincode.tgz" \
-      --language=golang \
-      --label="$CC_NAME")
-
-    log "Deploying CCAAS '${CC_NAME}' in namespace $org_ns..."
+    log "Deploying CCAAS '${CC_NAME}' in namespace $org_ns (package: $PACKAGE_ID)..."
     kubectl hlf externalchaincode sync \
       --image="$CC_IMAGE" \
       --name="${CC_NAME}" \
@@ -872,9 +900,13 @@ CONNJSON2
       --package-id="$PACKAGE_ID" \
       --tls-required=false \
       --replicas="$CC_REPLICAS"
-
-    rm -rf "$TMPDIR"
   done
+
+  # --- Cleanup pre-built packages ---
+  for org_name in "${ALL_ACTIVE_ORGS[@]}"; do
+    rm -rf "${ORG_PKG_DIR["$org_name"]}"
+  done
+  unset ORG_PKG_DIR ORG_PKG_ID
 
   # Wait for all deployments
   for org_name in "${ALL_ACTIVE_ORGS[@]}"; do
@@ -886,22 +918,37 @@ CONNJSON2
 
   # Verify: querycommitted on first channel
   FIRST_CH="${CC_CHANNELS[0]}"
-  FIRST_ORG="${ACTIVE_ORGS[0]}"
-  first_org_ns=$(org_field "$FIRST_ORG" "namespace")
-  VERIFY_PEER=$(yq eval ".channels[] | select(.name == \"$FIRST_CH\") | .orgs[] | select(.name == \"$FIRST_ORG\") | .peers[0]" "$CONFIG")
 
-  TMPDIR_VERIFY=$(mktemp -d)
-  kubectl get secret "${FIRST_ORG}-${FIRST_CH}-cp" -n "$first_org_ns" \
-    -o jsonpath="{.data.config\.yaml}" | base64 --decode > "$TMPDIR_VERIFY/nc.yaml"
+  # Find an org that actually participates in FIRST_CH
+  VERIFY_ORG=""
+  for org_name in "${ACTIVE_ORGS[@]}"; do
+    # Check if this org is in FIRST_CH
+    ORG_IN_CH=$(yq eval ".channels[] | select(.name == \"$FIRST_CH\") | .orgs[] | select(.name == \"$org_name\") | .name" "$CONFIG")
+    if [[ -n "$ORG_IN_CH" ]]; then
+      VERIFY_ORG="$org_name"
+      break
+    fi
+  done
 
-  log "Verifying committed chaincode '$CC_NAME' on channel '$FIRST_CH'..."
-  kubectl hlf chaincode querycommitted \
-    --config="$TMPDIR_VERIFY/nc.yaml" \
-    --user="${FIRST_ORG}-admin-${first_org_ns}" \
-    --peer="${VERIFY_PEER}.${first_org_ns}" \
-    --channel="$FIRST_CH" || log "WARNING: querycommitted failed"
+  if [[ -z "$VERIFY_ORG" ]]; then
+    log "WARNING: No active org found in channel '$FIRST_CH' for verification. Skipping querycommitted."
+  else
+    verify_org_ns=$(org_field "$VERIFY_ORG" "namespace")
+    VERIFY_PEER=$(yq eval ".channels[] | select(.name == \"$FIRST_CH\") | .orgs[] | select(.name == \"$VERIFY_ORG\") | .peers[0]" "$CONFIG")
 
-  rm -rf "$TMPDIR_VERIFY"
+    TMPDIR_VERIFY=$(mktemp -d)
+    kubectl get secret "${VERIFY_ORG}-${FIRST_CH}-cp" -n "$verify_org_ns" \
+      -o jsonpath="{.data.config\.yaml}" | base64 --decode > "$TMPDIR_VERIFY/nc.yaml"
+
+    log "Verifying committed chaincode '$CC_NAME' on channel '$FIRST_CH' (org: $VERIFY_ORG)..."
+    kubectl hlf chaincode querycommitted \
+      --config="$TMPDIR_VERIFY/nc.yaml" \
+      --user="${VERIFY_ORG}-admin-${verify_org_ns}" \
+      --peer="${VERIFY_PEER}.${verify_org_ns}" \
+      --channel="$FIRST_CH" || log "WARNING: querycommitted failed"
+
+    rm -rf "$TMPDIR_VERIFY"
+  fi
   log "Chaincode '$CC_NAME' fully deployed"
 done
 fi
@@ -909,3 +956,4 @@ fi
 log "========================================="
 log "HLF Network Deployment Complete!"
 log "========================================="
+
